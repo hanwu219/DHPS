@@ -347,3 +347,5 @@ exist and contain the expected columns listed in `FEATURE_ORDER`.
   execution.
 - Evaluation results depend on the specific synthetic CSV files used. Always
   report the input file names and random seeds together with metric values.
+
+This repository is for peer-review purposes only. All rights reserved.
