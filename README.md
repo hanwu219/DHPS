@@ -1,110 +1,63 @@
-# Graph-Guided Synthetic CHARLS Data Generation and Evaluation
+# graph_v2_charls_ipf.py Usage Notes
 
-This repository contains a graph-guided pipeline for generating and evaluating
-synthetic CHARLS-style elderly population records. The core generation workflow
-uses a small real-data reference sample, dependency discovery, bootstrap target
-estimation, profile-based allocation, and LLM-assisted semantic validation to
-complete high-level health and social variables over an IPF demographic base.
+`graph_v2_charls_ipf.py` is the main CHARLS data synthesis experiment script. It uses a 200-record real-data sample as the source of conditional constraints and an IPF-generated demographic base as the population to complete. Through LangGraph, it connects structure discovery, target distribution estimation, profile grouping, LLM planning, LLM validation and generation, and second-fill steps, finally writing the synthetic data CSV.
 
-The repository also includes an evaluation suite for distributional fidelity,
-dependency preservation, utility, privacy risk, ablation analysis, and structural
-constraint violations.
+## Inputs and Outputs
 
-## Repository Structure
+The script currently targets remote server paths and does not read local `D:\...` paths by default.
 
-```text
-.
-|-- graph_v2_charls_ipf.py          Main graph-guided IPF generation pipeline
-|-- graph_v2_charls_ipf_a.py        Ablation variant
-|-- graph_v2_charls_ipf_b.py        Ablation variant
-|-- graph_v2_charls_ipf_b+c.py      Ablation variant
-|-- graph_v2_charls_ipf_c.py        Ablation variant
-|-- graph_v2_charls_great.py        GREAT-based generation script
-|-- graph_v2_charls_tabpfn.py       TabPFN-related generation script
-|-- graphstate.json                 Example or saved graph state
-|-- input.jsonl                     Batch input file for LLM requests
-|-- output_deepseek.jsonl           Batch output file from LLM requests
-|-- second_fill_log.txt             Log from the second-fill stage
-|-- analysis code/                  Evaluation and plotting scripts
-`-- great migration directory       GREAT migration-related files
-```
-
-## Data Inputs
-
-The main generation script is currently configured for server-style paths:
+Input files:
 
 ```text
 /root/v2/CHARLS_processed_2020.csv
 /root/v2/CHARLS_ipf.csv
 ```
 
-Most evaluation scripts under `analysis code/` use Windows paths by default:
+Output files:
 
 ```text
-D:\LLM generate data\data\CHARLS_processed_2020.csv
-D:\LLM generate data\data\synthetic_data_v12.csv
-D:\LLM generate data\data\synthetic_data_v16.csv
-D:\LLM generate data\data\synthetic_data_v17.csv
-D:\LLM generate data\data\synthetic_data_v17b.csv
+/root/v2/synthetic_data.csv
+/root/v2/second_fill_log.txt
 ```
 
-Update these paths or pass command-line arguments when running the scripts in a
-different environment.
+`synthetic_data.csv` will be overwritten. `second_fill_log.txt` records the rules and row indices used in the second-fill stage.
 
-## Real Data Preprocessing
+## Data Fields
 
-Across the evaluation scripts, the real CHARLS data is processed using the same
-standard procedure:
-
-1. Read `CHARLS_processed_2020.csv`.
-2. Drop `iwy` and `row_id` when present.
-3. Keep records with `income_total >= 0`.
-4. Bin `age` into:
-
-   ```text
-   60-, 60-64, 65-69, 70-74, 75-79, 80+
-   ```
-
-5. Bin `income_total` into tertiles:
-
-   ```text
-   Low, Medium, High
-   ```
-
-6. Drop the original continuous columns `age` and `income_total`.
-7. Keep records with `family_size <= 10`.
-8. Drop missing rows for the standard real-data reference.
-
-The main generation pipeline samples 200 real records as a small reference set:
-
-```python
-df = df_real.sample(n=200, random_state=24)
-```
-
-## Feature Groups
-
-The graph-guided pipeline separates variables into demographic features `D` and
-high-level target features `H`.
-
-Demographic features:
+Demographic features D:
 
 ```python
 ["age_bin", "gender", "income_bin", "family_size", "marry", "edu", "health_status"]
 ```
 
-High-level target features:
+High-level features H:
 
 ```python
 ["hospital", "exercise", "ins", "satlife", "social_need"]
 ```
 
-The IPF base contains the demographic features and is progressively completed
-with the high-level target features.
+Real sample processing workflow:
 
-## Generation Workflow
+1. Read `CHARLS_processed_2020.csv`.
+2. Delete `row_id` and `iwy`.
+3. Keep samples with `income_total >= 0`.
+4. Bin `age` into `age_bin`: `60-`, `60-64`, `65-69`, `70-74`, `75-79`, `80+`.
+5. Bin `income_total` into tertiles as `income_bin`: `Low`, `Medium`, `High`.
+6. Delete the original continuous columns `age` and `income_total`.
+7. Keep `family_size <= 10`.
+8. Drop missing values.
+9. Use `random_state=24` to sample 200 records as the training/constraint sample.
 
-The main pipeline in `graph_v2_charls_ipf.py` is implemented as a LangGraph
-workflow:
+IPF base processing workflow:
+
+1. Read `CHARLS_ipf.csv`.
+2. Keep the D columns.
+3. Add H columns and initialize them as missing values.
+4. Complete the H columns step by step in the subsequent workflow.
+
+## Workflow
+
+LangGraph node order:
 
 ```text
 initialize_state
@@ -118,18 +71,15 @@ initialize_state
   -> END
 ```
 
-### 1. `initialize_state`
+### 1. initialize_state
 
-Loads the real CHARLS reference data, prepares the IPF base, defines `D` and `H`
-feature groups, and initializes the graph state.
+Initializes the data, field lists, and graph state.
 
-### 2. `llm_proposal`
+### 2. llm_proposal
 
-Uses `deepseek-reasoner` to propose plausible dependency edges between `D` and
-`H`, and between high-level features. Multiple LLM runs are aggregated by voting.
-Each candidate edge is also checked using normalized mutual information.
+Calls `deepseek-reasoner` concurrently for 10 runs, asking the LLM to propose potential D-H and H-H dependency edges.
 
-Default settings:
+Filtering rules:
 
 ```text
 TOTAL_RUNS = 10
@@ -137,110 +87,72 @@ VOTE_THRESHOLD = 6
 NMI_THRESHOLD = 0.02
 ```
 
-Only edges that pass both the voting criterion and the NMI threshold are used in
-later stages.
+Each candidate edge is also evaluated with NMI on the 200 real samples. Only edges that meet the threshold and receive enough votes enter the subsequent workflow.
 
-### 3. `bootstrap_target`
+### 3. bootstrap_target
 
-Runs bootstrap estimation over the 200-record reference sample. The procedure
-estimates:
+Runs 1000 bootstrap iterations on the 200 real samples to estimate:
 
-- Marginal distributions for each high-level feature.
-- Joint distributions for validated dependency edges.
+- The marginal distribution of each H feature.
+- The joint distributions of validated dependency edges.
 
-The generated target object has the following structure:
+Then calls `deepseek-reasoner` to perform a reality check on low-probability joint combinations and generate `corrections` for use in second-fill.
 
-```python
-{
-    "marginals": {
-        "hospital": {...},
-        "exercise": {...},
-        ...
-    },
-    "joints": {
-        "age_bin|hospital": {...},
-        "age_bin|ins": {...},
-        ...
-    }
-}
-```
+### 4. profiling
 
-Low-probability joint combinations are optionally reviewed by the LLM as a
-reality check. Approved corrections are later used by the second-fill stage.
+Based on the validated D-H dependency edges, selects related D columns to group the IPF base and generate `profiles`.
 
-### 4. `profiling`
+If no related D columns are found, it falls back to grouping by all D columns.
 
-Uses validated dependencies to group the IPF base into demographic profiles. If
-no relevant dependency is found for a target feature, the pipeline falls back to
-all demographic variables.
+### 5. planner
 
-### 5. `planner`
-
-Identifies the most urgent missing high-level feature and category by comparing
-the current synthetic population against the bootstrap target distribution.
-
-The urgency score is:
+Dynamically scans the H-column gaps in the current synthetic data and selects the most urgent target:
 
 ```text
 urgency = gap / available_slots
 ```
 
-The planner allocates at most:
+Each round plans at most:
 
 ```text
 batch_size = min(max_gap, 300)
 ```
 
-per planning round. It checks both `D-H` and `H-H` joint constraints before
-assigning rows to candidate profiles.
+During planning, it:
 
-### 6. `generator`
+- Checks H-H joint distribution conflicts.
+- Checks D-H joint distribution conflicts.
+- Calls `deepseek-reasoner` to allocate generation quotas among candidate profiles.
 
-Uses `deepseek-chat` to validate whether the planned fills are semantically
-reasonable. Validated fills are written back to the synthetic population. Failed
-tasks are recorded and used by later planning rounds.
+If there are no remaining gaps, it sets `finished=True` and enters `second_fill`.
 
-Default concurrency:
+### 6. generator
+
+Calls `deepseek-chat` to semantically validate the planned tasks.
+
+Concurrency limit:
 
 ```text
 asyncio.Semaphore(10)
 ```
 
-### 7. `second_fill`
+Tasks that pass validation are written to `df_large` in batches. Failure records are written to `failed_attempts` for reference by the next planner round.
 
-Uses LLM-approved low-probability corrections from `bootstrap_target` to fill
-remaining missing values. The final generated dataset is written to:
+### 7. second_fill
+
+Uses the LLM-corrected low-probability reasonable combinations from `bootstrap_target` to second-fill rows that still contain missing values.
+
+Final output:
 
 ```text
 /root/v2/synthetic_data.csv
 ```
 
-## Evaluation Scripts
+## Running
 
-The `analysis code/` directory contains a compact evaluation suite.
+Make sure the current environment contains the required dependencies and that `.env` is configured with the API keys required by DeepSeek/LangChain.
 
-| Script | Purpose | Main Output |
-|---|---|---|
-| `01_mutual_information_analysis.py` | Pairwise mutual information comparison between real and one synthetic dataset | MI heatmaps and distribution comparison |
-| `02_tsne_visualization.py` | t-SNE visualization of real and synthetic manifold coverage | t-SNE scatter plot |
-| `03_multi_model_mutual_information_analysis.py` | Mutual information comparison across multiple synthetic generators | Multi-model MI heatmap and metrics |
-| `04_adversarial_verification.py` | Real-vs-synthetic discriminator test | LR/DT AUC and PMSE table |
-| `05_tstr_evaluation.py` | Train-on-synthetic, test-on-real utility evaluation | TSTR summary table |
-| `06_privacy_risk_analysis.py` | DCR, membership inference, and attribute inference analysis | Privacy risk tables |
-| `07_ablation_global_metrics.py` | Ablation metrics based on MI fidelity and discriminator utility | MAE, RMSE, correlation, discriminator metrics |
-| `08_violation_frequency_distribution.py` | Near-zero and zero constraint violation distribution | Histogram with fitted density curves |
-| `09_ablation_jsd_case_plot.py` | Ablation JSD heatmap and specific-case structural collapse analysis | Figure with heatmap and grouped bars |
-
-Each script can be run independently. Most scripts print tabular results and
-save figures into a subdirectory under `analysis code/`.
-
-## Running the Main Pipeline
-
-Install the required dependencies and configure API credentials in `.env`.
-At minimum, the generation pipeline requires access to the DeepSeek models used
-by LangChain.
-
-Example server-side execution:
+Recommended execution in the `LLM` environment:
 
 ```bash
 conda activate LLM
@@ -248,33 +160,15 @@ cd /root/v2
 python graph_v2_charls_ipf.py
 ```
 
-Example Windows execution:
+Or, on Windows, call the equivalent remote environment through conda:
 
 ```powershell
 conda run -n LLM python graph_v2_charls_ipf.py
 ```
 
-## Running Evaluation Scripts
-
-Examples:
-
-```powershell
-python "analysis code/03_multi_model_mutual_information_analysis.py"
-python "analysis code/06_privacy_risk_analysis.py"
-python "analysis code/08_violation_frequency_distribution.py"
-python "analysis code/09_ablation_jsd_case_plot.py"
-```
-
-Most scripts expose command-line arguments for input paths, output directories,
-sample sizes, random seeds, and evaluation thresholds:
-
-```powershell
-python "analysis code/08_violation_frequency_distribution.py" --help
-```
-
 ## Dependencies
 
-Core dependencies include:
+Main dependencies include:
 
 ```text
 python-dotenv
@@ -288,64 +182,38 @@ pandas
 numpy
 scipy
 scikit-learn
-matplotlib
 ipfn
 aiohttp
 aiofiles
 faiss-cpu
 ```
 
-Install any missing packages in the target environment before running the graph
-pipeline or evaluation scripts.
+If model or API-related errors occur at runtime, check first:
 
-## Key Parameters
+1. Whether `.env` is loaded correctly.
+2. Whether the DeepSeek API key is available.
+3. Whether `langchain_deepseek` is installed.
+4. Whether the server can access the model API.
 
-| Parameter | Default | Location or Meaning |
+## Important Parameters
+
+| Parameter | Current Value | Location/Meaning |
 |---|---:|---|
-| Reference sample size | 200 | `df_real.sample(n=200, random_state=24)` |
-| LLM proposal runs | 10 | `TOTAL_RUNS` |
+| Small sample size | 200 | `df_real.sample(n=200, random_state=24)` |
+| LLM structure proposal runs | 10 | `TOTAL_RUNS` |
 | LLM vote threshold | 6 | `VOTE_THRESHOLD` |
 | NMI threshold | 0.02 | `NMI_THRESHOLD` |
-| Bootstrap iterations | 1000 | `n_iterations` in `bootstrap_target` |
-| Planning batch cap | 300 | `batch_size = min(max_gap, 300)` |
-| Generator concurrency | 10 | `asyncio.Semaphore(10)` |
+| Bootstrap iterations | 1000 | `n_iterations` |
+| Single-round planning cap | 300 | `batch_size = min(max_gap, 300)` |
+| Generation validation concurrency | 10 | `asyncio.Semaphore(10)` |
 | LangGraph recursion limit | 10000 | `config={"recursion_limit": 10000}` |
 
-## Reproducibility Notes
+## Notes
 
-- The real reference sample is fixed with `random_state=24`.
-- The original bootstrap step in `graph_v2_charls_ipf.py` uses pandas sampling
-  without an explicit bootstrap seed, so repeated runs may produce minor
-  numerical differences.
-- The analysis scripts generally expose `--random-state` or equivalent
-  arguments where stochastic procedures are used.
-- Generated CSV files may be overwritten by the pipeline. Back up important
-  outputs before rerunning generation scripts.
-
-## Troubleshooting
-
-If the generation pipeline fails, check the following:
-
-1. `.env` is loaded correctly.
-2. The DeepSeek API key is valid and has sufficient quota.
-3. `langchain_deepseek` and related LangChain packages are installed.
-4. The runtime machine can access the model API.
-5. Input CSV paths match the current operating system and directory layout.
-6. LLM responses are valid JSON where JSON is expected.
-
-If an evaluation script fails, first verify that all required input CSV files
-exist and contain the expected columns listed in `FEATURE_ORDER`.
-
-## Important Notes
-
-- The main generation script and the evaluation scripts currently use different
-  default path conventions (`/root/v2/...` versus `D:\...`). Adjust paths before
-  moving between server and Windows environments.
-- LLM calls can be time-consuming and may incur API costs.
-- Some legacy Chinese comments in older scripts may display incorrectly in
-  terminals with a different encoding. This does not necessarily affect Python
-  execution.
-- Evaluation results depend on the specific synthetic CSV files used. Always
-  report the input file names and random seeds together with metric values.
+- Script paths are currently hard-coded as `/root/v2/...`; update input and output paths before migrating to another directory.
+- The program calls the LLM many times, so runtime and cost depend on sample size, planning rounds, and API response speed.
+- `synthetic_data.csv` will be overwritten. Back up old results before running.
+- If the planner loops for a long time, first check the low-probability filtering threshold, LLM JSON return format, and `ignored_features` logs.
+- Some Chinese comments in the code may display as garbled text in certain terminals. This does not affect Python execution.
 
 This repository is for peer-review purposes only. All rights reserved.
